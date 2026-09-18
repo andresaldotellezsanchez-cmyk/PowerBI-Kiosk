@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Rotación de Reportes Power BI</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --bar-bg: rgba(15, 17, 23, 0.92);
+    --text: #e8eaed;
+    --muted: #9aa0a6;
+    --accent: #4da3ff;
+    --dot-off: #3a3f4a;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  }
+  #stage {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+  }
+  iframe {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: none;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.4s ease-in-out;
+    background: var(--bg);
+  }
+  iframe.active {
+    opacity: 1;
+    visibility: visible;
+  }
+  #bar {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 16px;
+    background: var(--bar-bg);
+    color: var(--text);
+    font-size: 13px;
+    z-index: 20;
+  }
+  #label { font-weight: 600; white-space: nowrap; }
+  #clock { color: var(--muted); min-width: 32px; }
+  #bar button {
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.14);
+    color: var(--text);
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  #bar button:hover { background: rgba(255,255,255,0.18); }
+  #bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #dots { display: flex; gap: 7px; margin-left: auto; }
+  .dot {
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    background: var(--dot-off);
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  .dot.on { background: var(--accent); }
+</style>
+</head>
+<body>
+  <div id="stage"></div>
+
+  <div id="bar">
+    <span id="label">Reporte 1 / 4</span>
+    <span id="clock">30s</span>
+    <button id="pauseBtn" type="button">Pausar</button>
+    <button id="fsBtn" type="button">Pantalla completa</button>
+    <div id="dots"></div>
+  </div>
+
+<script>
+/* =====================================================================
+   CONFIGURA AQUÍ TUS REPORTES: url + duración en segundos.
+   Agrega, quita o reordena elementos del arreglo libremente.
+   ===================================================================== */
+const slides = [
+  { url: "https://app.powerbi.com/reportEmbed?reportId=b4537587-4c8a-4e25-9181-bbc25227bc28&autoAuth=true&ctid=545a22f8-d8a5-4f29-94f6-fdf8715e9268&pageName=b254ae86782a17d3194c&navContentPaneEnabled=false", duration: 30 },
+  { url: "https://app.powerbi.com/reportEmbed?reportId=b4537587-4c8a-4e25-9181-bbc25227bc28&autoAuth=true&ctid=545a22f8-d8a5-4f29-94f6-fdf8715e9268&pageName=96cb500aaec1c7f0db30&navContentPaneEnabled=false", duration: 60 },
+  { url: "https://app.powerbi.com/reportEmbed?reportId=b4537587-4c8a-4e25-9181-bbc25227bc28&autoAuth=true&ctid=545a22f8-d8a5-4f29-94f6-fdf8715e9268&pageName=07264c23d9c4a330396d&navContentPaneEnabled=false", duration: 45 },
+  { url: "https://app.powerbi.com/reportEmbed?reportId=b4537587-4c8a-4e25-9181-bbc25227bc28&autoAuth=true&ctid=545a22f8-d8a5-4f29-94f6-fdf8715e9268&pageName=d8f45c252317c5485be4&navContentPaneEnabled=false", duration: 45 },
+];
+
+// Segundos ANTES del cambio en que se empieza a precargar CADA reporte.
+// Si un reporte no trae "preloadLead" propio, se usa este valor por defecto.
+// Para el reporte pesado, agrégale su propio "preloadLead: 30" en su objeto
+// dentro de "slides", por ejemplo:
+//   { url: "...", duration: 60, preloadLead: 30 }
+const DEFAULT_PRELOAD_LEAD_SECONDS = 12;
+/* ===================================================================== */
+
+const stage    = document.getElementById('stage');
+const label    = document.getElementById('label');
+const clock    = document.getElementById('clock');
+const dotsEl   = document.getElementById('dots');
+const pauseBtn = document.getElementById('pauseBtn');
+const fsBtn    = document.getElementById('fsBtn');
+
+let current = 0;
+let secondsLeft = 0;
+let paused = false;
+let preloadedNext = false;
+
+// Como mucho hay 2 iframes vivos a la vez (el actual, y el siguiente solo
+// durante el tramo final antes del cambio). Los demás se destruyen.
+const loaded = new Map(); // index -> iframe
+
+function ensureLoaded(index) {
+  if (!loaded.has(index)) {
+    const f = document.createElement('iframe');
+    f.src = slides[index].url;
+    f.title = 'Reporte ' + (index + 1);
+    f.allowFullscreen = true;
+    stage.appendChild(f);
+    loaded.set(index, f);
+  }
+  return loaded.get(index);
+}
+
+function unloadExcept(keepIndexes) {
+  for (const [idx, f] of loaded.entries()) {
+    if (!keepIndexes.includes(idx)) {
+      f.remove();
+      loaded.delete(idx);
+    }
+  }
+}
+
+function updateVisibility() {
+  loaded.forEach((f, idx) => f.classList.toggle('active', idx === current));
+}
+
+// Puntos de navegación (uno por reporte)
+const dots = slides.map((_, i) => {
+  const d = document.createElement('div');
+  d.className = 'dot';
+  d.title = 'Ir al reporte ' + (i + 1);
+  d.addEventListener('click', () => goTo(i));
+  dotsEl.appendChild(d);
+  return d;
+});
+
+function render() {
+  dots.forEach((d, i) => d.classList.toggle('on', i === current));
+  label.textContent = `Reporte ${current + 1} / ${slides.length}`;
+  clock.textContent = `${secondsLeft}s`;
+}
+
+function goTo(index) {
+  current = index;
+  secondsLeft = slides[current].duration;
+  preloadedNext = false;
+
+  ensureLoaded(current);
+  updateVisibility();
+  unloadExcept([current]); // libera todo excepto el que se está mostrando ahora
+
+  render();
+}
+
+function tick() {
+  if (paused) return;
+  secondsLeft--;
+
+  // Solo hasta el tramo final se prepara el siguiente en segundo plano.
+  // Usa el "preloadLead" propio del reporte que sigue (o el valor por defecto).
+  const nextIndex = (current + 1) % slides.length;
+  const lead = slides[nextIndex].preloadLead ?? DEFAULT_PRELOAD_LEAD_SECONDS;
+  if (!preloadedNext && secondsLeft <= lead) {
+    ensureLoaded(nextIndex);
+    preloadedNext = true;
+  }
+
+  if (secondsLeft <= 0) {
+    goTo((current + 1) % slides.length);
+  } else {
+    render();
+  }
+}
+
+function togglePause() {
+  paused = !paused;
+  pauseBtn.textContent = paused ? 'Reanudar' : 'Pausar';
+}
+
+function toggleFullscreen() {
+  if (!document.fullscreenElement) {
+    document.documentElement.requestFullscreen().catch(() => {});
+  } else {
+    document.exitFullscreen();
+  }
+}
+
+pauseBtn.addEventListener('click', togglePause);
+fsBtn.addEventListener('click', toggleFullscreen);
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowRight') goTo((current + 1) % slides.length);
+  else if (e.key === 'ArrowLeft') goTo((current - 1 + slides.length) % slides.length);
+  else if (e.code === 'Space') { e.preventDefault(); togglePause(); }
+  else if (e.key === 'f' || e.key === 'F') toggleFullscreen();
+});
+
+goTo(0);
+setInterval(tick, 1000);
+
+// Recarga toda la página cada cierto tiempo, para forzar un refresco
+// completo de sesión en pantallas encendidas muchas horas.
+setTimeout(() => location.reload(), 4 * 60 * 60 * 1000);
+</script>
+</body>
+</html>
